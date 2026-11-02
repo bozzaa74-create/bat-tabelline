@@ -121,7 +121,7 @@ button.green{background:#27ad5e;box-shadow:4px 4px 0 #111a35}
 </main>
 <script>
 const KEY='gothamMultiplication_v1', CFG='gothamGoogleDriveConfig';
-let data=loadData(), game=null, tick=null, googleToken=null, googleTokenClient=null, googleTokenTimer=null, googleAuthBusy=false;
+let data=loadData(), game=null, tick=null, googleToken=null, googleTokenClient=null, googleTokenTimer=null, googleAuthBusy=false, googleTokenExpiresAt=0;
 function blank(){return {players:{},history:[],lastSync:null}}
 function loadData(){try{return JSON.parse(localStorage.getItem(KEY))||blank()}catch(e){return blank()}}
 function save(){localStorage.setItem(KEY,JSON.stringify(data));refreshHome()}
@@ -170,6 +170,7 @@ function requestGoogleToken(silent=false){
    googleAuthBusy=false;
    if(resp.error){reject(Error(resp.error));return}
    googleToken=resp.access_token;
+   googleTokenExpiresAt=Date.now()+(Number(resp.expires_in)||3600)*1000;
    localStorage.setItem('gothamGoogleConnected','1');
    setGoogleConnected(true);
    scheduleGoogleRenewal(resp.expires_in);
@@ -210,17 +211,29 @@ async function restoreGoogleSession(){
   cloudMsg('Google richiede un nuovo consenso o una connessione. Premi «Accedi con Google» per riconnetterti. ('+e.message+')');
  }
 }
-async function driveRequest(url,opts={}){if(!googleToken)throw Error('Prima premi «Accedi con Google».');let r=await fetch(url,{...opts,headers:{Authorization:'Bearer '+googleToken,...(opts.headers||{})}});if(!r.ok){let msg=await r.text();throw Error('Google Drive ('+r.status+'): '+msg.slice(0,220))}if(r.status===204)return null;let type=r.headers.get('content-type')||'';return type.includes('json')?r.json():r.text()}
+async function driveRequest(url,opts={},retried=false){
+ if(!googleToken){if(!retried)await requestGoogleToken(true);else throw Error('Prima premi «Accedi con Google».')}
+ let r=await fetch(url,{...opts,headers:{Authorization:'Bearer '+googleToken,...(opts.headers||{})}});
+ // Se Google rifiuta il token (401), prova una sola volta a riottenerlo in background.
+ if(r.status===401&&!retried){await requestGoogleToken(true);return driveRequest(url,opts,true)}
+ if(!r.ok){let msg=await r.text();throw Error('Google Drive ('+r.status+'): '+msg.slice(0,220))}
+ if(r.status===204)return null;let type=r.headers.get('content-type')||'';return type.includes('json')?r.json():r.text()
+}
 async function findDriveBackup(){let q=encodeURIComponent("name='gotham-backup.json' and trashed=false");let r=await driveRequest('https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q='+q+'&fields=files(id,name,modifiedTime)');return r.files?.[0]||null}
 async function syncGoogle(){try{cloudMsg('Sincronizzazione con Google Drive in corso…');let file=await findDriveBackup();if(file){let remote=await driveRequest('https://www.googleapis.com/drive/v3/files/'+file.id+'?alt=media');if(typeof remote==='string')remote=JSON.parse(remote);if(remote?.players)mergeData(remote)}let payload=JSON.stringify(data);if(file){await driveRequest('https://www.googleapis.com/upload/drive/v3/files/'+file.id+'?uploadType=media',{method:'PATCH',headers:{'Content-Type':'application/json'},body:payload})}else{let boundary='gotham_boundary';let body='--'+boundary+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'+JSON.stringify({name:'gotham-backup.json',parents:['appDataFolder']})+'\r\n--'+boundary+'\r\nContent-Type: application/json\r\n\r\n'+payload+'\r\n--'+boundary+'--';let meta=await driveRequest('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',{method:'POST',headers:{'Content-Type':'multipart/related; boundary='+boundary},body});if(!meta?.id)throw Error('Google Drive non ha restituito il file di backup.')}save();document.getElementById('cloudStatus').textContent='● Google Drive collegato';document.getElementById('googleLoginHome').textContent='✓ GOOGLE COLLEGATO';cloudMsg('✓ Backup sincronizzato con Google Drive. Sugli altri dispositivi accedi con lo stesso account e premi Sincronizza.')}catch(e){cloudMsg('Sincronizzazione non riuscita: '+e.message)}}
 function googleLogout(){
  const oldToken=googleToken;
  if(googleTokenTimer)clearTimeout(googleTokenTimer);
- googleTokenTimer=null;googleToken=null;googleTokenClient=null;googleAuthBusy=false;
+ googleTokenTimer=null;googleToken=null;googleTokenExpiresAt=0;googleTokenClient=null;googleAuthBusy=false;
  localStorage.removeItem('gothamGoogleConnected');setGoogleConnected(false);
  try{if(oldToken&&window.google?.accounts?.oauth2)google.accounts.oauth2.revoke(oldToken,()=>{});}catch(e){}
  cloudMsg('Sei uscito da Google. Per collegarti di nuovo premi «Accedi con Google».');
 }
+document.addEventListener('visibilitychange',()=>{
+ if(document.visibilityState==='visible'&&localStorage.getItem('gothamGoogleConnected')==='1'&&googleTokenClient){
+  if(!googleToken||Date.now()>googleTokenExpiresAt-120000){requestGoogleToken(true).then(()=>syncGoogle()).catch(()=>{cloudMsg('La sessione Google richiede un nuovo accesso. Premi «Accedi con Google» per riconnetterti.')})}
+ }
+});
 (function init(){let c=JSON.parse(localStorage.getItem(CFG)||'{}');if(c.clientId)document.getElementById('clientId').value=c.clientId;refreshHome();tableSelectionChanged();if(c.clientId&&localStorage.getItem('gothamGoogleConnected')==='1'){restoreGoogleSession()}else if(c.clientId){document.getElementById('cloudStatus').textContent='● Google pronto'} })();
 </script>
 </body></html>
